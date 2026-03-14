@@ -1,0 +1,6 @@
+.venv/
+.demo_env/
+db/echo.db
+__pycache__/
+*.pyc
+.DS_Store
