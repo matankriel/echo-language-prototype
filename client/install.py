@@ -109,7 +109,6 @@ def main() -> None:
         sys.exit(0)
 
     install_specs: list[str] = []
-    substituted: list[tuple[str, str, str]] = []  # (package, original_ver, patched_ver)
     blocked = False
 
     for package, version in packages:
@@ -135,47 +134,40 @@ def main() -> None:
         first_patched = result["first_patched_version"]
         artifact = result.get("patched_artifact")
 
+        # Parse patched version from artifact filename e.g. requests-2.28.2+echo1-py3-none-any.whl
+        pivot_ver = None
+        if artifact:
+            m = re.match(r"[^-]+-([^-]+)-", artifact)
+            if m:
+                pivot_ver = m.group(1).replace("_", "+", 1)
+
+        sev_color = _R if severity == "High" else _Y
+        print(
+            f"\n  {sev_color}[ECHO] ⚠ CVE DETECTED:{_X} {package}=={version} — {_B}{cve_id}{_X} "
+            f"({sev_color}{severity}{_X}, CVSS {cvss})"
+        )
+        print(f"         Affected range:   {_Y}{affected_range}{_X}")
+        print(f"         Safe release:     {package}>={first_patched}")
+        if pivot_ver:
+            print(f"         Echo patched:     {_G}{package}=={pivot_ver}{_X}  ← same version, backport fix applied")
+        print(f"         Fix options:")
+        print(f"           pip install '{package}>={first_patched}'        # upgrade to safe release")
+        if pivot_ver:
+            print(f"           pip install '{package}=={pivot_ver}' \\")
+            print(f"             --find-links factory/artifacts/                   # use Echo patched build")
+
         if severity == "High":
-            print(
-                f"\n  {_R}[ECHO] ✗ BLOCKED:{_X} {package}=={version} — {_B}{cve_id}{_X} "
-                f"({_R}{severity}{_X}, CVSS {cvss})"
-            )
-            print(f"         Affected range:  {_Y}{affected_range}{_X}")
-            print(f"         Quick fix:       pip install '{package}>={first_patched}'")
-            if artifact:
-                print(
-                    f"         Patched build:   {artifact} available but severity requires explicit upgrade"
-                )
             blocked = True
-
         else:
-            # Non-high severity — warn and substitute patched artifact
-            patched_ver = None
-            if artifact:
-                # Parse version from filename e.g. requests-2.28.2+echo1-py3-none-any.whl
-                m = re.match(r"[^-]+-([^-]+)-", artifact)
-                if m:
-                    patched_ver = m.group(1).replace("_", "+", 1)
-
+            # Medium — allow the vulnerable version through
             print(
-                f"\n  {_Y}[ECHO] ⚠ WARNING:{_X} {package}=={version} — {_B}{cve_id}{_X} "
-                f"({_Y}{severity}{_X}, CVSS {cvss})"
+                f"\n  {_Y}[ECHO] ⚠ Proceeding with vulnerable version (Medium severity — explicit fix recommended){_X}"
             )
-            print(f"         Affected range:  {affected_range}")
-            if patched_ver:
-                print(f"         Proceeding with patched backport: {_G}{package}-{patched_ver}{_X}")
-                print(f"         Recommended fix: pip install '{package}>={first_patched}'")
-                install_specs.append(f"{package}=={patched_ver}")
-                substituted.append((package, version, patched_ver))
-            else:
-                # No artifact yet — warn but use original
-                print(f"         {_Y}Patched artifact not yet available — using original{_X}")
-                print(f"         Recommended fix: pip install '{package}>={first_patched}'")
-                install_specs.append(f"{package}=={version}")
+            install_specs.append(f"{package}=={version}")
 
     if blocked:
         print(
-            f"\n  {_R}[ECHO] BUILD BLOCKED{_X} — one or more High severity CVEs require explicit upgrade."
+            f"\n  {_R}[ECHO] ✗ BUILD BLOCKED{_X} — one or more High severity CVEs require explicit upgrade."
         )
         print(f"  {_D}Resolve the CVEs above and re-run.{_X}\n")
         sys.exit(1)
@@ -197,20 +189,6 @@ def main() -> None:
 
     if result_proc.returncode != 0:
         sys.exit(result_proc.returncode)
-
-    # Post-install injection notices
-    for package, original_ver, patched_ver in substituted:
-        # Extract dist-info name for SBOM path hint
-        dist_tag = patched_ver.replace("+", "").replace(".", "")
-        print(
-            f"\n  {_C}[ECHO] NOTE:{_X} {package} was forcibly injected with "
-            f"{_B}{package}=={patched_ver}{_X}"
-        )
-        print(f"               instead of requested {package}=={original_ver}")
-        print(
-            f"               (SBOM embedded — check "
-            f"{package}-{patched_ver}.dist-info/sbom.cdx.json)"
-        )
 
 
 if __name__ == "__main__":

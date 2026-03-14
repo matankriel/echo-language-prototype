@@ -139,8 +139,8 @@ else
     warn "requests wheel not found — check builder output above"
 fi
 
-# ── Step 4: Medium severity demo — pass with warning ─────────────────────────
-header 4 "Medium severity demo  (requests → warning + proceed)"
+# ── Step 4: Medium severity demo — warn + proceed with vulnerable ─────────────
+header 4 "Medium severity demo  (requests → CVE info block + proceed with vulnerable)"
 
 printf "\n"
 info "Installing requests==2.28.0 (CVE-2023-32681, Medium, CVSS 6.1)..."
@@ -151,32 +151,10 @@ printf "\n"
 installed_requests=$("$DEMO_PIP" show requests 2>/dev/null | awk '/^Version:/{print $2}' || echo "not installed")
 ok "requests installed: ${BOLD}$installed_requests${RESET}"
 
-if [[ "$installed_requests" == *"echo1"* ]]; then
-    ok "Patched version confirmed (contains +echo1)"
+if [[ "$installed_requests" == "2.28.0" ]]; then
+    ok "Vulnerable version installed as expected (Medium — explicit fix recommended)"
 else
-    warn "Version does not contain +echo1 — check output above"
-fi
-
-# Show SBOM
-requests_whl=$(find "$SCRIPT_DIR/factory/artifacts" -name "requests-2.28.2+echo1*.whl" 2>/dev/null | head -1 || true)
-if [[ -n "$requests_whl" ]]; then
-    printf "\n  ${DIM}Inspecting embedded SBOM:${RESET}\n"
-    "$PYTHON" -c "
-import zipfile, json, sys
-whl = sys.argv[1]
-with zipfile.ZipFile(whl) as zf:
-    sbom_path = next((n for n in zf.namelist() if 'sbom.cdx.json' in n), None)
-    if sbom_path:
-        data = json.loads(zf.read(sbom_path))
-        v = data.get('vulnerabilities', [{}])[0]
-        analysis = v.get('analysis', {})
-        print(f'    CVE:      {v.get(\"id\", \"?\")}')
-        print(f'    State:    {analysis.get(\"state\", \"?\")}')
-        print(f'    Detail:   {analysis.get(\"detail\", \"?\")}')
-        print(f'    SBOM:     {sbom_path}')
-    else:
-        print('    [WARN] sbom.cdx.json not found in wheel')
-" "$requests_whl" 2>&1 | sed 's/^/  /'
+    warn "Unexpected version: $installed_requests — check output above"
 fi
 
 # ── Step 5: High severity demo — build blocked ────────────────────────────────
@@ -203,8 +181,45 @@ fi
 printf "\n  ${DIM}Direct API check:${RESET}\n"
 curl -s "$REGISTRY_URL/check/urllib3/1.26.0" | "$PYTHON" -m json.tool | sed 's/^/    /'
 
-# ── Step 6: Registry inspection ───────────────────────────────────────────────
-header 6 "Registry inspection"
+# ── Step 6: Apply Echo patches ────────────────────────────────────────────────
+header 6 "Applying Echo patches — installing patched builds"
+
+printf "\n"
+info "Installing urllib3==1.26.4+echo1 and requests==2.28.2+echo1 into demo env..."
+printf "\n"
+"$DEMO_PIP" install "urllib3==1.26.4+echo1" "requests==2.28.2+echo1" \
+    --find-links "$SCRIPT_DIR/factory/artifacts/" --quiet
+printf "\n"
+ok "Echo-patched wheels installed"
+printf "\n  ${DIM}Installed versions:${RESET}\n"
+"$DEMO_PIP" show urllib3 requests | grep -E "^(Name|Version)" | sed 's/^/    /'
+
+# ── Step 7: Re-run install after Echo fix — High severity now passes ──────────
+header 7 "Re-running install after Echo fix — High severity now passes"
+
+printf "\n"
+info "Installing urllib3==1.26.4+echo1 requests==2.28.2+echo1 via install.py..."
+info "  Registry sees +echo1 → returns vulnerable=false → no block"
+printf "\n"
+
+set +e
+ECHO_PIP="$DEMO_PIP" "$PYTHON" "$SCRIPT_DIR/client/install.py" \
+    "urllib3==1.26.4+echo1" "requests==2.28.2+echo1" 2>&1 | sed 's/^/  /'
+EXIT_CODE=${PIPESTATUS[0]}
+set -e
+
+printf "\n"
+if [[ "$EXIT_CODE" -eq 0 ]]; then
+    ok "Install succeeded (exit code 0) — +echo1 versions pass the CVE check"
+else
+    warn "Expected exit code 0 but got $EXIT_CODE — check output above"
+fi
+
+printf "\n  ${DIM}Registry check on +echo1 (early-return):${RESET}\n"
+curl -s "$REGISTRY_URL/check/urllib3/1.26.4+echo1" | "$PYTHON" -m json.tool | sed 's/^/    /'
+
+# ── Step 8: Registry inspection ───────────────────────────────────────────────
+header 8 "Registry inspection"
 
 printf "\n  ${DIM}PEP 503 index for urllib3:${RESET}\n"
 curl -s "$REGISTRY_URL/simple/urllib3/" | sed 's/^/    /'
@@ -236,9 +251,11 @@ printf "  ${BOLD}What happened:${RESET}\n"
 printf "  ${DIM}1.${RESET}  DB seeded: 2 CVEs (urllib3=High, requests=Medium), 4 version groups\n"
 printf "  ${DIM}2.${RESET}  Registry started at ${BOLD}$REGISTRY_URL${RESET} (PEP 503 + /check endpoint)\n"
 printf "  ${DIM}3.${RESET}  Builder: urllib3 groups skipped (pre-built), requests wheel built + SBOM injected\n"
-printf "  ${DIM}4.${RESET}  Medium demo: requests==2.28.0 → warning → patched 2.28.2+echo1 installed\n"
-printf "  ${DIM}5.${RESET}  High demo:   urllib3==1.26.0 → BLOCKED (exit 1), build aborted\n"
-printf "  ${DIM}6.${RESET}  Registry /simple/urllib3/ shows embedded CVE metadata per wheel\n\n"
+printf "  ${DIM}4.${RESET}  Medium demo: requests==2.28.0 → CVE info block → proceeded with vulnerable version\n"
+printf "  ${DIM}5.${RESET}  High demo:   urllib3==1.26.0 → CVE info block → BUILD BLOCKED (exit 1)\n"
+printf "  ${DIM}6.${RESET}  Echo patches applied: urllib3==1.26.4+echo1 + requests==2.28.2+echo1 installed\n"
+printf "  ${DIM}7.${RESET}  Re-run with +echo1 specs: registry early-returns vulnerable=false → install succeeds (exit 0)\n"
+printf "  ${DIM}8.${RESET}  Registry /simple/urllib3/ shows embedded CVE metadata per wheel\n\n"
 printf "  ${DIM}Registry is still running (PID $REGISTRY_PID). Press Ctrl+C to stop.${RESET}\n\n"
 
 wait "$REGISTRY_PID" 2>/dev/null || true

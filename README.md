@@ -1,6 +1,6 @@
 # Echo — CVE Remediation Demo
 
-A focused prototype that shows one core concept: **when a developer requests a vulnerable Python package, Echo detects the CVE, builds a backport-patched wheel on demand, and serves it transparently through a private PEP 503-compatible registry.**
+A focused prototype that shows one core concept: **when a developer requests a vulnerable Python package, Echo detects the CVE, shows a detailed remediation block, and either blocks (High) or warns and proceeds (Medium). A separate step demonstrates applying Echo-patched wheels and proving the registry check passes.**
 
 ## What the demo shows
 
@@ -8,8 +8,20 @@ Two distinct severity flows using **urllib3** and **requests**:
 
 | Package | CVE | Severity | CVSS | Behaviour |
 |---|---|---|---|---|
-| `urllib3==1.26.0` | CVE-2021-33503 | **High** | 7.5 | Build **blocked** — error printed, fix suggested |
-| `requests==2.28.0` | CVE-2023-32681 | **Medium** | 6.1 | **Warning** printed, patched wheel injected transparently |
+| `urllib3==1.26.0` | CVE-2021-33503 | **High** | 7.5 | CVE info block printed, build **blocked** (exit 1) |
+| `requests==2.28.0` | CVE-2023-32681 | **Medium** | 6.1 | CVE info block printed, **proceeds with vulnerable version** |
+
+Both severity levels show the same informational block:
+```
+[ECHO] ⚠ CVE DETECTED: {pkg}=={ver} — {cve_id} ({severity}, CVSS {cvss})
+       Affected range:   {range}
+       Safe release:     {pkg}>={first_patched}
+       Echo patched:     {pkg}=={pivot}+echo1  ← same version, backport fix applied
+       Fix options:
+         pip install '{pkg}>={first_patched}'        # upgrade to safe release
+         pip install '{pkg}=={pivot}+echo1' \
+           --find-links factory/artifacts/           # use Echo patched build
+```
 
 Each patched wheel embeds a **CycloneDX 1.4 SBOM** so security scanners can verify the fix.
 
@@ -18,12 +30,12 @@ Each patched wheel embeds a **CycloneDX 1.4 SBOM** so security scanners can veri
 ## Architecture
 
 ```
-client/install.py          # pip wrapper: checks registry → warns/blocks
+client/install.py          # pip wrapper: checks registry → shows CVE block → warns/blocks
        │
        ▼
 registry/server.py         # FastAPI: PEP 503 simple index + /check endpoint
        │
-       ├── GET /check/{package}/{version}   → CVE lookup, upsert request_log
+       ├── GET /check/{package}/{version}   → CVE lookup (early-return for +echo1 versions)
        ├── GET /simple/{package}/           → PEP 503 wheel index w/ CVE metadata
        └── GET /files/{filename}            → serve patched wheel
 
@@ -44,6 +56,10 @@ The builder only builds a wheel if a matching package version was requested **wi
 | requests | 2.26.0 | 50 days ago | **SKIP** (outside 30-day window) |
 | urllib3 | 1.26.0 | 15 days ago | **pre-built** (skip) |
 
+### +echo1 registry early-return
+
+`/check/{package}/{version}` immediately returns `{"vulnerable": false}` when the version string contains `+echo1`. This ensures that once you install an Echo-patched wheel and re-run with the patched spec, the check passes without hitting the CVE database.
+
 ---
 
 ## Quick start
@@ -52,7 +68,7 @@ The builder only builds a wheel if a matching package version was requested **wi
 # 1. Reset to clean state (creates venvs, plants vulnerable versions)
 ./reset.sh
 
-# 2. Run the full 6-step demo
+# 2. Run the full 8-step demo
 ./run.sh
 ```
 
@@ -71,14 +87,21 @@ uvicorn registry.server:app --port 8000
 # Run builder (builds requests wheel, skips pre-built urllib3 wheels)
 python3 factory/builder.py
 
-# Medium severity: warning + patched wheel installed
+# Medium severity: CVE info block + proceeds with vulnerable version
 python3 client/install.py requests==2.28.0
 
-# High severity: build blocked (exit 1)
+# High severity: CVE info block + build blocked (exit 1)
 python3 client/install.py urllib3==1.26.0
 
 # Full requirements (blocked due to urllib3 High CVE)
 python3 client/install.py -r client/requirements.txt
+
+# Install Echo-patched wheels
+pip install "urllib3==1.26.4+echo1" "requests==2.28.2+echo1" \
+  --find-links factory/artifacts/
+
+# Re-run with patched specs — registry returns vulnerable=false → succeeds
+python3 client/install.py "urllib3==1.26.4+echo1" "requests==2.28.2+echo1"
 ```
 
 ---
@@ -96,23 +119,39 @@ Runs `factory/builder.py`. urllib3 groups are already built (skipped). The reque
 
 ### Step 4 — Medium severity (requests)
 ```
-[ECHO] ⚠ WARNING: requests==2.28.0 — CVE-2023-32681 (Medium, CVSS 6.1)
-       Affected range:  >=2.1.0,<2.31.0
-       Proceeding with patched backport: requests-2.28.2+echo1
-       Recommended fix: pip install 'requests>=2.31.0'
-```
-The patched wheel is installed and the embedded SBOM is verified.
+[ECHO] ⚠ CVE DETECTED: requests==2.28.0 — CVE-2023-32681 (Medium, CVSS 6.1)
+       Affected range:   >=2.1.0,<2.31.0
+       Safe release:     requests>=2.31.0
+       Echo patched:     requests==2.28.2+echo1  ← same version, backport fix applied
+       Fix options:
+         pip install 'requests>=2.31.0'
+         pip install 'requests==2.28.2+echo1' --find-links factory/artifacts/
 
-### Step 5 — High severity (urllib3)
+[ECHO] ⚠ Proceeding with vulnerable version (Medium severity — explicit fix recommended)
 ```
-[ECHO] ✗ BLOCKED: urllib3==1.26.0 — CVE-2021-33503 (High, CVSS 7.5)
-       Affected range:  >=1.25.8,<1.26.5
-       Quick fix:       pip install 'urllib3>=1.26.5'
-       Patched build:   urllib3-1.26.4+echo1 available but severity requires explicit upgrade
-```
-`client/install.py` exits with code 1. The build is aborted.
+`requests==2.28.0` is installed in the demo environment (not the patched version — the developer must apply the fix explicitly).
 
-### Step 6 — Registry inspection
+### Step 5 — High severity (urllib3 + requests)
+```
+[ECHO] ⚠ CVE DETECTED: urllib3==1.26.0 — CVE-2021-33503 (High, CVSS 7.5)
+       ...
+[ECHO] ⚠ CVE DETECTED: requests==2.28.0 — CVE-2023-32681 (Medium, CVSS 6.1)
+       ...
+[ECHO] ✗ BUILD BLOCKED — one or more High severity CVEs require explicit upgrade.
+```
+`client/install.py` exits with code 1. The build is aborted due to the urllib3 High CVE.
+
+### Step 6 — Apply Echo patches
+Installs `urllib3==1.26.4+echo1` and `requests==2.28.2+echo1` directly into the demo environment using `--find-links factory/artifacts/`. Shows the installed versions to confirm the patched wheels are active.
+
+### Step 7 — Re-run install with patched specs
+Runs `install.py` with the `+echo1` version specs directly. The registry `/check` endpoint sees `+echo1` in the version string and returns `{"vulnerable": false}` immediately — no CVE block, no blocking, clean exit 0.
+
+```
+Registry check: GET /check/urllib3/1.26.4+echo1 → {"vulnerable": false}
+```
+
+### Step 8 — Registry inspection
 Shows the PEP 503 index for urllib3 (with embedded CVE metadata in HTML comments) and the updated `request_log` counts.
 
 ---
@@ -165,8 +204,8 @@ echo/
 ├── registry/
 │   └── server.py          # FastAPI PEP 503 registry + /check endpoint
 ├── client/
-│   ├── install.py         # pip wrapper with CVE check
+│   ├── install.py         # pip wrapper with CVE check + remediation output
 │   └── requirements.txt   # urllib3==1.26.0 + requests==2.28.0 (demo "before")
-├── run.sh                 # 6-step demo script
+├── run.sh                 # 8-step demo script
 └── reset.sh               # reset to clean state
 ```

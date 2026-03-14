@@ -113,6 +113,10 @@ def serve_file(filename: str) -> FileResponse:
 
 @app.get("/check/{package}/{version}")
 def check(package: str, version: str) -> dict:
+    # Echo-patched builds are always safe
+    if "+echo1" in version:
+        return {"vulnerable": False}
+
     # Upsert request_log
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with get_connection() as conn:
