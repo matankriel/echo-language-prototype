@@ -43,7 +43,8 @@ factory/builder.py         # demand-driven backport builder (30-day filter)
 factory/sbom.py            # CycloneDX SBOM generator + wheel injector
 
 db/schema.py               # SQLite schema (cves, version_groups, request_log)
-db/seed.py                 # seed 2 CVEs + version groups + demo request_log
+db/discover.py             # GHSA discovery: fetches live CVE data → populates DB
+db/seed.py                 # seeds demo request_log rows (30-day window illustration)
 ```
 
 ### Demand-driven build filter
@@ -62,23 +63,56 @@ The builder only builds a wheel if a matching package version was requested **wi
 
 ---
 
+## Getting a GitHub token
+
+Echo uses the GitHub Security Advisory (GHSA) GraphQL API to fetch live CVE data. The API requires a GitHub personal access token — **no special scopes or permissions are needed**, just a basic token that proves you have a GitHub account.
+
+**Classic token (simplest):**
+1. Go to **github.com → Settings → Developer settings → Personal access tokens → Tokens (classic)**
+2. Click **Generate new token (classic)**
+3. Give it any name (e.g. `echo-demo`)
+4. Leave **all scopes unchecked** — the GHSA API only needs public read access
+5. Click **Generate token** and copy it
+
+**Fine-grained token (alternative):**
+1. Go to **github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens**
+2. Click **Generate new token**
+3. Set expiration, leave repository access as **Public Repositories (read-only)**
+4. No additional permissions needed — click **Generate token** and copy it
+
+Once you have a token:
+```bash
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+```
+
+> Tokens starting with `ghp_` are classic tokens; `github_pat_` are fine-grained. Both work.
+
+---
+
 ## Quick start
 
 ```bash
-# 1. Reset to clean state (creates venvs, plants vulnerable versions)
+# 1. Export your GitHub token (see above)
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+
+# 2. Reset to clean state (creates venvs, plants vulnerable versions)
 ./reset.sh
 
-# 2. Run the full 8-step demo
+# 3. Run the full 8-step demo
 ./run.sh
 ```
 
-> **Requirements:** Python 3.9+, internet access (builder downloads sdists from PyPI).
+> **Requirements:** Python 3.9+, internet access, `GITHUB_TOKEN` env var.
 > Both scripts auto-create `.venv` (tool environment) and `.demo_env` (simulated customer environment).
 
 ### Manual steps
 
 ```bash
-# Seed database
+# Discover CVEs from GHSA and populate the database
+export GITHUB_TOKEN=ghp_xxx
+python3 db/discover.py urllib3 requests
+
+# Seed demo request_log rows (30-day demand window illustration)
 python3 db/seed.py
 
 # Start registry on :8000
@@ -111,8 +145,8 @@ python3 client/install.py "urllib3==1.26.4+echo1" "requests==2.28.2+echo1"
 ### Step 1 — Pre-flight
 Checks Python, dependencies, and verifies the three urllib3 pre-built wheels exist in `factory/artifacts/`. Shows the demo environment's "before" state (`urllib3==1.26.0`, `requests==2.28.0`).
 
-### Step 2 — Seed DB + start registry
-Populates SQLite with 2 CVEs, 4 version groups, and 5 request_log rows. Starts the FastAPI registry on `:8000`.
+### Step 2 — Discover CVEs + seed DB + start registry
+Runs `db/discover.py` to query the GitHub Security Advisory database (GHSA) for urllib3 and requests advisories; maps each advisory to a `cves` + `version_groups` row and resolves the pivot version from PyPI. Then runs `db/seed.py` to insert 5 synthetic `request_log` rows. Starts the FastAPI registry on `:8000`.
 
 ### Step 3 — Builder (demand-driven)
 Runs `factory/builder.py`. urllib3 groups are already built (skipped). The requests group (`2.28.0` was requested 7 days ago) is eligible and built. A CycloneDX SBOM is injected into the wheel.
@@ -196,7 +230,8 @@ with zipfile.ZipFile('factory/artifacts/requests-2.28.2+echo1-py3-none-any.whl')
 echo/
 ├── db/
 │   ├── schema.py          # SQLite schema + get_connection() + init_db()
-│   └── seed.py            # seed CVEs, version groups, request_log
+│   ├── discover.py        # GHSA discovery service → populates cves + version_groups
+│   └── seed.py            # seeds demo request_log rows
 ├── factory/
 │   ├── builder.py         # demand-driven backport wheel builder
 │   ├── sbom.py            # CycloneDX SBOM generator + wheel injector

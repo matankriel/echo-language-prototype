@@ -1,0 +1,164 @@
+{
+  "_readme": [
+    "This file is a human-readable snapshot of db/echo.db (SQLite).",
+    "It is NOT read by any code — the live database is the source of truth.",
+    "Run `python3 db/discover.py urllib3:CVE-2021-33503 requests:CVE-2023-32681`",
+    "then `python3 db/seed.py` to repopulate the real DB from live GHSA data."
+  ],
+
+  "_schema": {
+    "cves": {
+      "primary_key": "cve_id",
+      "description": "One row per CVE. Populated by db/discover.py from GitHub Security Advisories.",
+      "columns": {
+        "cve_id":                "CVE-YYYY-NNNNN identifier (or GHSA-xxxx fallback if no CVE assigned)",
+        "package":               "PyPI package name, lowercased (e.g. 'urllib3')",
+        "severity":              "Low | Medium | High | Critical  (mapped from GHSA LOW/MODERATE/HIGH/CRITICAL)",
+        "cvss_score":            "CVSS v3 base score (float), e.g. 7.5. NULL if GHSA has no score.",
+        "first_patched_version": "The first safe release according to GHSA, e.g. '1.26.5'",
+        "description":           "One-line summary from the GHSA advisory"
+      }
+    },
+    "version_groups": {
+      "primary_key": "id (autoincrement)",
+      "foreign_key": "cve_id → cves.cve_id",
+      "description": [
+        "One row per affected version range within a CVE.",
+        "A single CVE can have multiple groups (e.g. urllib3 v1 branch vs v2 branch).",
+        "The builder writes artifact_filename / artifact_sha256 / built_at once it builds the wheel.",
+        "discover.py uses INSERT OR IGNORE so a row with a built artifact is never overwritten."
+      ],
+      "columns": {
+        "id":                "Auto-increment integer PK",
+        "cve_id":            "FK → cves.cve_id",
+        "version_range":     "PEP 440 specifier, e.g. '>=1.25.4,<1.26.5'. Versions inside this range are vulnerable.",
+        "pivot_version":     "Latest stable PyPI release inside version_range. The builder downloads this as the 'old' source.",
+        "artifact_filename": "Wheel filename once built, e.g. 'urllib3-1.26.4+echo1-py2.py3-none-any.whl'. NULL = not yet built.",
+        "artifact_sha256":   "SHA-256 hex digest of the wheel file. Used by the PEP 503 index href fragment (#sha256=...).",
+        "built_at":          "UTC timestamp of when the builder (or link_prebuilt_artifacts) last wrote this row."
+      }
+    },
+    "request_log": {
+      "primary_key": "(package, version)  — composite",
+      "description": [
+        "One row per (package, version) pair that has ever been checked via GET /check/{package}/{version}.",
+        "Seeded synthetically by db/seed.py to set up the 30-day demand window demo.",
+        "Updated live by registry/server.py on every /check call (upsert: increments request_count).",
+        "The builder reads this table to decide which version_groups are worth building.",
+        "A group is eligible if: artifact_filename IS NULL AND any request_log row for the same",
+        "package+version (that falls inside version_range) has last_requested within the past 30 days."
+      ],
+      "columns": {
+        "package":        "PyPI package name, lowercased",
+        "version":        "Exact version string that was installed/checked, e.g. '2.28.0'",
+        "last_requested": "UTC timestamp of the most recent /check call for this (package, version)",
+        "request_count":  "Running total of /check calls. Incremented on every registry hit."
+      }
+    }
+  },
+
+  "_relationships": {
+    "cves  1 ──< version_groups  many": [
+      "CVE-2021-33503 has 1 group  (urllib3 >=1.25.4,<1.26.5)",
+      "CVE-2023-32681 has 1 group  (requests >=2.3.0,<2.31.0)",
+      "A CVE covering multiple release branches would have 2+ groups, each with its own pivot and wheel."
+    ],
+    "request_log is independent": [
+      "No FK to cves or version_groups.",
+      "The builder joins them in Python: for each unbuilt group, check if any request_log row",
+      "for the same package has a version inside group.version_range AND last_requested > now-30d."
+    ]
+  },
+
+  "_data_flow": {
+    "1_discovery": "db/discover.py  →  queries GitHub GraphQL API (GHSA) for advisory nodes",
+    "2_pivot":     "db/discover.py  →  queries pypi.org/pypi/{pkg}/json, picks latest stable in range",
+    "3_upsert":    "db/discover.py  →  writes cves + version_groups rows; links pre-built wheels",
+    "4_seed":      "db/seed.py      →  writes synthetic request_log rows (demo timestamps)",
+    "5_registry":  "registry/server.py  →  upserts request_log on every /check call",
+    "6_builder":   "factory/builder.py  →  reads eligible groups, downloads sdist, builds +echo1 wheel, writes artifact_filename+sha256+built_at back to version_groups",
+    "7_serve":     "registry/server.py  →  reads version_groups JOIN cves to serve /simple/{pkg}/ and /check/{pkg}/{ver}"
+  },
+
+  "tables": {
+    "cves": [
+      {
+        "cve_id": "CVE-2021-33503",
+        "package": "urllib3",
+        "severity": "High",
+        "cvss_score": 7.5,
+        "first_patched_version": "1.26.5",
+        "description": "Catastrophic backtracking in URL authority parser when passed URL containing many @ characters"
+      },
+      {
+        "cve_id": "CVE-2023-32681",
+        "package": "requests",
+        "severity": "Medium",
+        "cvss_score": 6.1,
+        "first_patched_version": "2.31.0",
+        "description": "Unintended leak of Proxy-Authorization header in requests"
+      }
+    ],
+
+    "version_groups": [
+      {
+        "_note": "urllib3 v1 branch — covers 1.25.4 through 1.26.4. Pre-built wheel linked by discover.py.",
+        "id": 1,
+        "cve_id": "CVE-2021-33503",
+        "version_range": ">=1.25.4,<1.26.5",
+        "pivot_version": "1.26.4",
+        "artifact_filename": "urllib3-1.26.4+echo1-py2.py3-none-any.whl",
+        "artifact_sha256": "9e72fe81130616dd830a62ad08d0b2518edd0f0d1200654905764962e8152bee",
+        "built_at": "2026-03-14 19:35:45"
+      },
+      {
+        "_note": "requests — built on-demand during the demo because 2.28.0 was requested 7 days ago.",
+        "id": 2,
+        "cve_id": "CVE-2023-32681",
+        "version_range": ">=2.3.0,<2.31.0",
+        "pivot_version": "2.30.0",
+        "artifact_filename": "requests-2.30.0+echo1-py3-none-any.whl",
+        "artifact_sha256": "aaeebe2971d91adc1254b9b56d3ae2849bf859d0e28064dffd93a4a7d1771f81",
+        "built_at": "2026-03-14 19:35:50"
+      }
+    ],
+
+    "request_log": [
+      {
+        "_note": "50 days ago — OUTSIDE 30-day window → builder skips",
+        "package": "requests",
+        "version": "2.26.0",
+        "last_requested": "2026-01-23 19:35:45",
+        "request_count": 1
+      },
+      {
+        "_note": "7 days ago — WITHIN 30-day window AND in CVE range → builder triggered BUILD for pivot 2.30.0. request_count incremented live by /check calls during demo.",
+        "package": "requests",
+        "version": "2.28.0",
+        "last_requested": "2026-03-14 19:35:51",
+        "request_count": 7
+      },
+      {
+        "_note": "45 days ago — OUTSIDE 30-day window → builder skips",
+        "package": "urllib3",
+        "version": "1.25.3",
+        "last_requested": "2026-01-28 19:35:45",
+        "request_count": 2
+      },
+      {
+        "_note": "15 days ago — WITHIN 30-day window AND in CVE range, but artifact already linked by discover.py → builder skips (artifact_filename IS NOT NULL). request_count incremented live.",
+        "package": "urllib3",
+        "version": "1.26.0",
+        "last_requested": "2026-03-14 19:35:51",
+        "request_count": 5
+      },
+      {
+        "_note": "5 days ago — WITHIN 30-day window but 2.3.0 is NOT in CVE range >=1.25.4,<1.26.5 → builder skips",
+        "package": "urllib3",
+        "version": "2.3.0",
+        "last_requested": "2026-03-09 19:35:45",
+        "request_count": 1
+      }
+    ]
+  }
+}

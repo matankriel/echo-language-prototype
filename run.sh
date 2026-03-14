@@ -99,10 +99,18 @@ current_requests=$("$DEMO_PIP" show requests 2>/dev/null | awk '/^Version:/{prin
 printf "  ${DIM}└─${RESET} urllib3  version: ${YELLOW}${BOLD}$current_urllib3${RESET}  ${RED}← CVE-2021-33503 (High)${RESET}\n"
 printf "  ${DIM}└─${RESET} requests version: ${YELLOW}${BOLD}$current_requests${RESET}  ${YELLOW}← CVE-2023-32681 (Medium)${RESET}\n"
 
-# ── Step 2: Seed database + start registry ────────────────────────────────────
-header 2 "Seed database + start registry"
+# ── Step 2: Discover CVEs + seed DB + start registry ─────────────────────────
+header 2 "Discover CVEs + seed DB + start registry"
 
 cd "$SCRIPT_DIR"
+
+if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+    fail "GITHUB_TOKEN is not set — export it before running:"
+    info "  export GITHUB_TOKEN=ghp_xxx"
+    exit 1
+fi
+
+"$PYTHON" db/discover.py urllib3:CVE-2021-33503 requests:CVE-2023-32681
 "$PYTHON" db/seed.py
 
 printf "\n"
@@ -123,7 +131,7 @@ header 3 "Builder  (demand-driven, 30-day filter)"
 
 printf "\n"
 info "Running factory/builder.py ..."
-info "  urllib3 groups: pre-built → skip"
+info "  urllib3 groups: artifact linked by discover.py → skip"
 info "  requests 2.28.0 (7d ago)  → ${GREEN}BUILD${RESET}"
 info "  requests 2.26.0 (50d ago) → ${YELLOW}SKIP${RESET} (outside 30-day window)"
 printf "\n"
@@ -131,12 +139,59 @@ printf "\n"
 "$PYTHON" "$SCRIPT_DIR/factory/builder.py" 2>&1 | sed 's/^/    /'
 printf "\n"
 
-requests_whl=$(find "$SCRIPT_DIR/factory/artifacts" -name "requests-2.28.2+echo1*.whl" 2>/dev/null | head -1 || true)
+requests_whl=$(find "$SCRIPT_DIR/factory/artifacts" -name "requests-*+echo1*.whl" 2>/dev/null | head -1 || true)
 if [[ -n "$requests_whl" ]]; then
     ok "requests patched wheel built: $(basename "$requests_whl")"
     ok "SBOM injected into wheel"
 else
     warn "requests wheel not found — check builder output above"
+fi
+
+# Resolve the actual +echo1 version specs from the DB for use in Steps 6 and 7
+URLLIB3_ECHO_SPEC=$("$PYTHON" - <<'PYEOF'
+import sys; sys.path.insert(0, '.')
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
+from db.schema import get_connection
+demo = Version("1.26.0")
+with get_connection() as conn:
+    rows = conn.execute("""
+        SELECT vg.pivot_version, vg.version_range FROM version_groups vg
+        JOIN cves c ON c.cve_id = vg.cve_id
+        WHERE c.package = 'urllib3' AND vg.artifact_filename IS NOT NULL
+    """).fetchall()
+    for r in rows:
+        try:
+            if demo in SpecifierSet(r['version_range']):
+                print(f"urllib3=={r['pivot_version']}+echo1"); break
+        except Exception:
+            pass
+PYEOF
+)
+
+REQUESTS_ECHO_SPEC=$("$PYTHON" - <<'PYEOF'
+import sys; sys.path.insert(0, '.')
+from db.schema import get_connection
+with get_connection() as conn:
+    row = conn.execute("""
+        SELECT vg.pivot_version FROM version_groups vg
+        JOIN cves c ON c.cve_id = vg.cve_id
+        WHERE c.package = 'requests' AND vg.artifact_filename IS NOT NULL
+        LIMIT 1
+    """).fetchone()
+    if row: print(f"requests=={row['pivot_version']}+echo1")
+PYEOF
+)
+
+if [[ -n "$URLLIB3_ECHO_SPEC" ]]; then
+    ok "urllib3 echo spec: ${BOLD}$URLLIB3_ECHO_SPEC${RESET}"
+else
+    warn "Could not resolve urllib3 echo spec — Steps 6/7 may fail"
+fi
+if [[ -n "$REQUESTS_ECHO_SPEC" ]]; then
+    ok "requests echo spec: ${BOLD}$REQUESTS_ECHO_SPEC${RESET}"
+else
+    warn "Could not resolve requests echo spec — Steps 6/7 may fail"
 fi
 
 # ── Step 4: Medium severity demo — warn + proceed with vulnerable ─────────────
@@ -185,9 +240,9 @@ curl -s "$REGISTRY_URL/check/urllib3/1.26.0" | "$PYTHON" -m json.tool | sed 's/^
 header 6 "Applying Echo patches — installing patched builds"
 
 printf "\n"
-info "Installing urllib3==1.26.4+echo1 and requests==2.28.2+echo1 into demo env..."
+info "Installing ${BOLD}$URLLIB3_ECHO_SPEC${RESET} and ${BOLD}$REQUESTS_ECHO_SPEC${RESET} into demo env..."
 printf "\n"
-"$DEMO_PIP" install "urllib3==1.26.4+echo1" "requests==2.28.2+echo1" \
+"$DEMO_PIP" install "$URLLIB3_ECHO_SPEC" "$REQUESTS_ECHO_SPEC" \
     --find-links "$SCRIPT_DIR/factory/artifacts/" --quiet
 printf "\n"
 ok "Echo-patched wheels installed"
@@ -198,13 +253,13 @@ printf "\n  ${DIM}Installed versions:${RESET}\n"
 header 7 "Re-running install after Echo fix — High severity now passes"
 
 printf "\n"
-info "Installing urllib3==1.26.4+echo1 requests==2.28.2+echo1 via install.py..."
+info "Installing ${BOLD}$URLLIB3_ECHO_SPEC${RESET} ${BOLD}$REQUESTS_ECHO_SPEC${RESET} via install.py..."
 info "  Registry sees +echo1 → returns vulnerable=false → no block"
 printf "\n"
 
 set +e
 ECHO_PIP="$DEMO_PIP" "$PYTHON" "$SCRIPT_DIR/client/install.py" \
-    "urllib3==1.26.4+echo1" "requests==2.28.2+echo1" 2>&1 | sed 's/^/  /'
+    "$URLLIB3_ECHO_SPEC" "$REQUESTS_ECHO_SPEC" 2>&1 | sed 's/^/  /'
 EXIT_CODE=${PIPESTATUS[0]}
 set -e
 
@@ -216,7 +271,8 @@ else
 fi
 
 printf "\n  ${DIM}Registry check on +echo1 (early-return):${RESET}\n"
-curl -s "$REGISTRY_URL/check/urllib3/1.26.4+echo1" | "$PYTHON" -m json.tool | sed 's/^/    /'
+URLLIB3_ECHO_VER="${URLLIB3_ECHO_SPEC#*==}"
+curl -s "$REGISTRY_URL/check/urllib3/$URLLIB3_ECHO_VER" | "$PYTHON" -m json.tool | sed 's/^/    /'
 
 # ── Step 8: Registry inspection ───────────────────────────────────────────────
 header 8 "Registry inspection"
@@ -248,12 +304,12 @@ PYEOF
 sep
 printf "\n${BOLD}${GREEN}  Demo complete!${RESET}\n\n"
 printf "  ${BOLD}What happened:${RESET}\n"
-printf "  ${DIM}1.${RESET}  DB seeded: 2 CVEs (urllib3=High, requests=Medium), 4 version groups\n"
+printf "  ${DIM}1.${RESET}  DB populated: CVEs + version groups fetched live from GitHub Security Advisory (GHSA)\n"
 printf "  ${DIM}2.${RESET}  Registry started at ${BOLD}$REGISTRY_URL${RESET} (PEP 503 + /check endpoint)\n"
-printf "  ${DIM}3.${RESET}  Builder: urllib3 groups skipped (pre-built), requests wheel built + SBOM injected\n"
+printf "  ${DIM}3.${RESET}  Builder: urllib3 groups skipped (linked by discover), requests wheel built + SBOM injected\n"
 printf "  ${DIM}4.${RESET}  Medium demo: requests==2.28.0 → CVE info block → proceeded with vulnerable version\n"
 printf "  ${DIM}5.${RESET}  High demo:   urllib3==1.26.0 → CVE info block → BUILD BLOCKED (exit 1)\n"
-printf "  ${DIM}6.${RESET}  Echo patches applied: urllib3==1.26.4+echo1 + requests==2.28.2+echo1 installed\n"
+printf "  ${DIM}6.${RESET}  Echo patches applied: $URLLIB3_ECHO_SPEC + $REQUESTS_ECHO_SPEC installed\n"
 printf "  ${DIM}7.${RESET}  Re-run with +echo1 specs: registry early-returns vulnerable=false → install succeeds (exit 0)\n"
 printf "  ${DIM}8.${RESET}  Registry /simple/urllib3/ shows embedded CVE metadata per wheel\n\n"
 printf "  ${DIM}Registry is still running (PID $REGISTRY_PID). Press Ctrl+C to stop.${RESET}\n\n"
