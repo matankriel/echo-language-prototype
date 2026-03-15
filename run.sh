@@ -81,18 +81,6 @@ else
     ok "Dependencies installed"
 fi
 
-# Verify urllib3 pre-built wheels exist
-for whl in urllib3-1.25.7+echo1-py2.py3-none-any.whl \
-           urllib3-1.26.4+echo1-py2.py3-none-any.whl \
-           urllib3-2.0.5+echo1-py3-none-any.whl; do
-    if [[ -f "$SCRIPT_DIR/factory/artifacts/$whl" ]]; then
-        ok "Pre-built wheel: $whl"
-    else
-        fail "Missing pre-built wheel: $whl"
-        exit 1
-    fi
-done
-
 printf "\n  ${BOLD}Demo environment state (before):${RESET}\n"
 current_urllib3=$("$DEMO_PIP" show urllib3  2>/dev/null | awk '/^Version:/{print $2}' || echo "not installed")
 current_requests=$("$DEMO_PIP" show requests 2>/dev/null | awk '/^Version:/{print $2}' || echo "not installed")
@@ -131,21 +119,23 @@ header 3 "Builder  (demand-driven, 30-day filter)"
 
 printf "\n"
 info "Running factory/builder.py ..."
-info "  urllib3 groups: artifact linked by discover.py → skip"
-info "  requests 2.28.0 (7d ago)  → ${GREEN}BUILD${RESET}"
-info "  requests 2.26.0 (50d ago) → ${YELLOW}SKIP${RESET} (outside 30-day window)"
+info "  urllib3 1.26.0 (15d ago)  → ${GREEN}BUILD${RESET}  (in CVE range, within 30d)"
+info "  urllib3 1.25.3 (45d ago)  → ${YELLOW}SKIP${RESET}  (outside 30-day window)"
+info "  requests 2.28.0 (7d ago)  → ${GREEN}BUILD${RESET}  (in CVE range, within 30d)"
+info "  requests 2.26.0 (50d ago) → ${YELLOW}SKIP${RESET}  (outside 30-day window)"
 printf "\n"
 
 "$PYTHON" "$SCRIPT_DIR/factory/builder.py" 2>&1 | sed 's/^/    /'
 printf "\n"
 
-requests_whl=$(find "$SCRIPT_DIR/factory/artifacts" -name "requests-*+echo1*.whl" 2>/dev/null | head -1 || true)
-if [[ -n "$requests_whl" ]]; then
-    ok "requests patched wheel built: $(basename "$requests_whl")"
-    ok "SBOM injected into wheel"
-else
-    warn "requests wheel not found — check builder output above"
-fi
+for _pkg in urllib3 requests; do
+    _whl=$(find "$SCRIPT_DIR/factory/artifacts" -name "${_pkg}-*+echo1*.whl" 2>/dev/null | head -1 || true)
+    if [[ -n "$_whl" ]]; then
+        ok "$_pkg patched wheel built: $(basename "$_whl")"
+    else
+        warn "$_pkg wheel not found — check builder output above"
+    fi
+done
 
 # Resolve the actual +echo1 version specs from the DB for use in Steps 6 and 7
 URLLIB3_ECHO_SPEC=$("$PYTHON" - <<'PYEOF'
@@ -306,7 +296,7 @@ printf "\n${BOLD}${GREEN}  Demo complete!${RESET}\n\n"
 printf "  ${BOLD}What happened:${RESET}\n"
 printf "  ${DIM}1.${RESET}  DB populated: CVEs + version groups fetched live from GitHub Security Advisory (GHSA)\n"
 printf "  ${DIM}2.${RESET}  Registry started at ${BOLD}$REGISTRY_URL${RESET} (PEP 503 + /check endpoint)\n"
-printf "  ${DIM}3.${RESET}  Builder: urllib3 groups skipped (linked by discover), requests wheel built + SBOM injected\n"
+printf "  ${DIM}3.${RESET}  Builder: urllib3 + requests wheels built on-demand + SBOM injected into each\n"
 printf "  ${DIM}4.${RESET}  Medium demo: requests==2.28.0 → CVE info block → proceeded with vulnerable version\n"
 printf "  ${DIM}5.${RESET}  High demo:   urllib3==1.26.0 → CVE info block → BUILD BLOCKED (exit 1)\n"
 printf "  ${DIM}6.${RESET}  Echo patches applied: $URLLIB3_ECHO_SPEC + $REQUESTS_ECHO_SPEC installed\n"
